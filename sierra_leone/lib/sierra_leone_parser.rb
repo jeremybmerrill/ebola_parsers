@@ -55,7 +55,7 @@ CONTACTS = ["cum_contacts",
             "new_completed_contacts",
             "percent_seen",]
 
-HEADERS = [ LAB_RESULTS,  EBOLA_CASES,   CORPSES,   VHF_MANAGEMENT_ETC,   CONTACTS ]
+HEADERS   = {'lab_results' => LAB_RESULTS,'ebola_cases' => EBOLA_CASES, 'corpses' => CORPSES, 'vhf_management_etc' => VHF_MANAGEMENT_ETC, 'contacts' => CONTACTS }
 TYPES   = ['lab_results','ebola_cases', 'corpses', 'vhf_management_etc', 'contacts']
 
 DEFAULT_NAME = "sierra_leone_ebola"
@@ -79,6 +79,23 @@ class SierraLeoneEbolaParser
     # ActiveRecord::Base.connection.execute("CREATE TABLE IF NOT EXISTS #{DEFAULT_NAME}_citywide(region varchar(30), date datetime, "+
     #   SIERRA_LEONE_EBOLA_HEADERS.join(" integer,")+" integer" +
     #   ")") if @config["mysql"]
+  end
+
+  def figure_out_table_type(first_row)
+    if first_row[0] == "SAMPLES RECEIVED"
+      "lab_results"
+    elsif first_row[0] == "District population"
+      'ebola_cases'
+    elsif first_row[0].match(/\d\d-\d\d-\d\d/)
+      'corpses'
+    elsif first_row.select{|r| r.length > 1 }[0] == "Admissions"
+      'vhf_management_etc'
+    elsif first_row[0] == "Total Contacts listed during outbreak"
+      'contacts'
+    else 
+      puts first_row.inspect
+      nil
+    end
   end
 
   def process(pdf_data, pdf_path, date)
@@ -147,21 +164,28 @@ class SierraLeoneEbolaParser
     # contacts = page.spreadsheets[4]
     spreadsheets = pages.map(&:spreadsheets).flatten
     spreadsheets.each_with_index do |spreadsheet, index|
-      # lab_results and vhf_management_etc tables have weird headers (not all S.L. districts). Excluding them.
-      next if ['lab_results', 'vhf_management_etc'].include? TYPES[index]
-      next if index > 5
-      report.types[TYPES[index]] = []
-      this_spreadsheet_headers = HEADERS[index]
+      puts "\n"
+      # these variables are set inside the block, but need scope into this block
+      spreadsheet_type = 'unset' 
+      this_spreadsheet_headers = nil
 
 
       # and for each row in that spreadsheet
-      spreadsheet.rows.each do |row|
-
+      spreadsheet.rows.each_with_index do |row, i|
         # get the name of the violation and the amount in this month (for this region)
         district_name, *row_text_data = *row.map{|cell| cell.text.gsub(",", '').gsub("\n", '').gsub("\r", '')}
-        row_data = row_text_data.map!(&:to_i)
+        row_data = row_text_data.map(&:to_i)
 
-        next if district_name.downcase == "total"
+        # figure out what kind of table this is
+        if spreadsheet_type == 'unset'
+          spreadsheet_type = figure_out_table_type(row_text_data)
+          spreadsheet_type = 'unset' if row_text_data.all?{|d| d.length == 0 }
+          report.types[spreadsheet_type] = []
+          this_spreadsheet_headers = HEADERS[spreadsheet_type]
+        end
+        next unless ['ebola_cases', 'corpses', 'contacts'].include? spreadsheet_type # only process these, the other two have wacky headers
+        next if district_name.downcase == "total" # duplicative (there's also "national")
+
 
         # but skip the header
         next if HEADER_NAMES.include?(district_name) || district_name.strip.empty?
@@ -174,7 +198,7 @@ class SierraLeoneEbolaParser
           region.statistics[item] = 0 unless region.statistics.has_key?(item)
         end
 
-        report.types[TYPES[index]] << region
+        report.types[spreadsheet_type] << region
       end
     end
     extractor.close!
@@ -196,7 +220,7 @@ class SierraLeoneEbolaReport
   end
 
   def to_a
-    transposed = (HEADERS.reduce(&:+).zip(@types.to_a.sort_by{|type| TYPES.index(type) }.map{|type, regs| regs.sort_by(&:region_name).map{|r| type == 'ebola_cases' ? r.to_a[0...-1] : r.to_a[1..-1] }.transpose }.reduce(&:+))).map{|row| [@date.strftime("%Y-%m-%d")] + row}
+    transposed = (HEADERS.values.reduce(&:+).zip(@types.to_a.sort_by{|type| TYPES.index(type) }.map{|type, regs| regs.sort_by(&:region_name).map{|r| type == 'ebola_cases' ? r.to_a[0...-1] : r.to_a[1..-1] }.transpose }.reduce(&:+))).map{|row| [@date.strftime("%Y-%m-%d")] + row}
     transposed[0][1] = "date"
     transposed[0][1] = "variable"
     transposed
